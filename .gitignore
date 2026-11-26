@@ -1,0 +1,17 @@
+.env
+node_modules/
+.vscode/
+__pycache__/
+*.py[cod]
+frontend/dist/
+storage/demo.mp4
+storage/uploads/*
+storage/original/*
+storage/clips/*
+storage/thumbnails/*
+storage/exports/*
+storage/templates/*
+storage/models/*.bin
+storage/models/*.part
+*.db
+logs/*.log
