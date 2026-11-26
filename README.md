@@ -29,6 +29,12 @@ npm run dev
 
 Open `http://localhost:5173`. The API runs at `http://localhost:4000`.
 
+## Deploy the frontend to Vercel
+
+Import this repository into Vercel with `frontend` as the Root Directory. Vercel should use the Vite preset, `npm run build`, and `dist` as the output directory. Set `VITE_API_URL` to the public origin of the API service (without a trailing slash).
+
+The API must run on a persistent host with Node.js, Python, and FFmpeg support. It writes SQLite data, uploads, and rendered clips to local storage and starts Python/FFmpeg processes, so deploying the API as a Vercel serverless function is not supported. On the API host, set `FRONTEND_URL` to the Vercel site's origin and set `YOUTUBE_REDIRECT_URI` to `https://<api-host>/api/youtube/callback`; add that exact URI to the Google OAuth client's authorized redirect URIs.
+
 ## Demo
 Upload a locally owned MP4 or a licensed MP4 through **Import**. Processing is asynchronous and clips appear in **Clips**.
 

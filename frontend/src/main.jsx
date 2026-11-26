@@ -7,7 +7,7 @@ import {
 } from 'lucide-react';
 import './styles.css';
 
-const API = 'http://localhost:4000';
+const API = (import.meta.env.VITE_API_URL || 'http://localhost:4000').replace(/\/+$/, '');
 
 function IconButton({ icon: Icon, label, active, onClick }) {
   return <button className={`nav-item ${active ? 'active' : ''}`} onClick={onClick} title={label}>
