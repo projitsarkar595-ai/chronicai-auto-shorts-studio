@@ -270,6 +270,24 @@ function Dashboard({stats, jobs, clips, setPage}) {
 function Import({sourceUrl,setSourceUrl,ownershipConfirmed,setOwnershipConfirmed,importUrl,uploadFile,busy,message,templates,defaultTemplateId,selectedTemplateId,setSelectedTemplateId,activeJobId}) {
   const [job,setJob] = useState(null);
   const [pollError,setPollError] = useState('');
+  const [pollVersion,setPollVersion] = useState(0);
+
+  async function retryJob() {
+    if (!job) return;
+    try {
+      await fetchJson(`${API}/api/jobs/${job.id}/retry`, {
+        method:'POST',
+        headers:{'Content-Type':'application/json'},
+        body:JSON.stringify({templateId:selectedTemplateId || defaultTemplateId})
+      });
+      setPollError('');
+      setJob({...job,status:'queued',error:null});
+      setPollVersion(version=>version+1);
+    } catch (error) {
+      setPollError(error.message || 'Could not retry video processing.');
+    }
+  }
+
   useEffect(() => {
     if (!activeJobId) return undefined;
     let active = true;
@@ -291,7 +309,7 @@ function Import({sourceUrl,setSourceUrl,ownershipConfirmed,setOwnershipConfirmed
     poll();
     timer = setInterval(poll, 1000);
     return () => { active = false; clearInterval(timer); };
-  }, [activeJobId]);
+  }, [activeJobId,pollVersion]);
 
   return <div className="import-layout">
     <section className="panel import-card">
@@ -299,7 +317,7 @@ function Import({sourceUrl,setSourceUrl,ownershipConfirmed,setOwnershipConfirmed
       <div className="template-select"><label htmlFor="import-template">Editing template</label><select id="import-template" value={selectedTemplateId} onChange={event=>setSelectedTemplateId(event.target.value)}>{templates.map(template=><option key={template.id} value={template.id}>{template.name}{template.id===defaultTemplateId?' · Default':''}</option>)}</select><small>Applied to this video. First captioned render downloads the 141 MiB Whisper speech model.</small></div>
       <form onSubmit={importUrl}><label htmlFor="source-url">Video link (YouTube, Instagram, or Facebook)</label><div className="url-row"><input id="source-url" value={sourceUrl} onChange={e=>setSourceUrl(e.target.value)} placeholder="Paste a public video link" /><button className="primary" disabled={busy || !sourceUrl || !ownershipConfirmed}>Import</button></div><label className="import-ownership"><input type="checkbox" checked={ownershipConfirmed} onChange={event=>setOwnershipConfirmed(event.target.checked)}/><span>I own this video or have permission to download and use it. It is public and does not require login.</span></label></form>
       {message && <div className="notice"><Check size={16}/>{message}</div>}
-      {job && <DownloadProgress job={job}/>}
+      {job && <DownloadProgress job={job} onRetry={retryJob}/>}
       {job?.file_path && ['processing','completed','failed'].includes(job.status) && <div className="source-preview"><div className="preview-heading"><div><b>Imported video</b><small>{job.title}</small></div><div className="preview-actions"><span>{job.status === 'completed' ? 'Ready' : job.status === 'failed' ? 'Processing failed' : 'Processing'}</span><a className="secondary" href={`${API}/api/jobs/${job.id}/download`}><Download size={14}/> Download</a></div></div><video controls preload="metadata" src={`${API}/${job.file_path}`} /></div>}
       {pollError && <div className="assistant-error">{pollError}</div>}
       <div className="divider"><span>OR</span></div>
@@ -308,7 +326,7 @@ function Import({sourceUrl,setSourceUrl,ownershipConfirmed,setOwnershipConfirmed
   </div>;
 }
 
-function DownloadProgress({job}) {
+function DownloadProgress({job,onRetry}) {
   const progress = Math.max(0, Math.min(100, Math.round(job.progress || 0)));
   const active = ['importing','downloading','processing'].includes(job.status);
   const processing = job.status === 'processing';
@@ -326,11 +344,12 @@ function DownloadProgress({job}) {
         : job.status === 'failed' ? 'Import failed'
           : 'Preparing import';
   return <div className={`download-progress ${job.status}`}>
-    <div className="download-progress-head"><div><b>{label}</b><small>{job.status === 'failed' ? job.error : `${formatBytes(job.downloaded_bytes)}${job.total_bytes ? ` of ${formatBytes(job.total_bytes)}` : ''}`}</small></div><strong>{processing ? <><span className="processing-spinner" aria-hidden="true"/>Working</> : job.status === 'downloading' && !job.total_bytes ? '…' : `${progress}%`}</strong></div>
+    <div className="download-progress-head"><div><b>{label}</b><small>{job.status === 'failed' ? job.error : job.error ? `Warning: ${job.error}` : `${formatBytes(job.downloaded_bytes)}${job.total_bytes ? ` of ${formatBytes(job.total_bytes)}` : ''}`}</small></div><strong>{processing ? <><span className="processing-spinner" aria-hidden="true"/>Working</> : job.status === 'downloading' && !job.total_bytes ? '…' : `${progress}%`}</strong></div>
     <div className="progress-track" role="progressbar" aria-label={processing ? 'Video processing' : 'Video import'} aria-valuetext={indeterminate ? 'In progress' : `${progress}%`} aria-valuenow={indeterminate ? undefined : progress}><i className={indeterminate ? processing ? 'processing' : 'indeterminate' : ''} style={indeterminate ? undefined : {width:`${progress}%`}}/></div>
     {job.status === 'downloading' && job.download_speed > 0 && <small className="download-speed">{formatBytes(job.download_speed)}/s</small>}
     {processing && <small className="processing-hint">Rendering clips and applying the selected template. This may take a few minutes.</small>}
     {active && !processing && <small className="progress-hint">Progress updates automatically</small>}
+    {job.status === 'failed' && <button className="secondary retry-job" onClick={onRetry}>Retry processing</button>}
   </div>;
 }
 

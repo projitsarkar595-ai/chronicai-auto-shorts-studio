@@ -126,7 +126,11 @@ def transcribe_with_whisper(input_path, output_dir, job_id, model_dir, model_nam
 
     filters = subprocess.run(["ffmpeg", "-hide_banner", "-filters"], capture_output=True, text=True, check=True)
     if not re.search(r"\bwhisper\b", filters.stdout):
-        raise RuntimeError("Installed FFmpeg does not include the whisper.cpp filter.")
+        print(
+            "WARNING: Speech captions were skipped because FFmpeg does not include the whisper.cpp filter.",
+            file=sys.stderr,
+        )
+        return []
 
     model_path = ensure_whisper_model(model_dir, model_name)
     transcript_path = Path(output_dir) / f"{job_id}_transcript.srt"

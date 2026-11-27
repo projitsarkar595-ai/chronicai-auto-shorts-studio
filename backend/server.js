@@ -141,7 +141,8 @@ function runPipeline(jobId, inputPath, title = 'Imported video', template = reso
         db.prepare('INSERT INTO clips(id,job_id,title,description,caption,hashtags,transcript,duration,path,created_at,template_id) VALUES(?,?,?,?,?,?,?,?,?,?,?)')
           .run(crypto.randomUUID(), jobId, clip.title || 'AI Short', clip.description || '', clip.caption || '', JSON.stringify(clip.hashtags || []), clip.transcript || '', clip.duration || 30, clip.path, new Date().toISOString(), template?.id || null);
       }
-      db.prepare('UPDATE jobs SET status=?,progress=100 WHERE id=?').run('completed', jobId);
+      const warning = pipelineError.split(/\r?\n/).find(line => line.startsWith('WARNING:'))?.replace(/^WARNING:\s*/, '').slice(0, 300) || null;
+      db.prepare('UPDATE jobs SET status=?,progress=100,error=? WHERE id=?').run('completed', warning, jobId);
     } catch (error) {
       logError(jobId, error.message);
       db.prepare('UPDATE jobs SET status=?,error=? WHERE id=?').run('failed', 'Invalid pipeline output', jobId);
@@ -167,6 +168,28 @@ app.get('/api/jobs/:id', (req, res) => {
   const job = db.prepare('SELECT * FROM jobs WHERE id=?').get(req.params.id);
   if (!job) return res.status(404).json({ error: 'Job not found.' });
   res.json(job);
+});
+
+app.post('/api/jobs/:id/retry', (req, res) => {
+  const job = db.prepare('SELECT * FROM jobs WHERE id=?').get(req.params.id);
+  if (!job) return res.status(404).json({ error: 'Job not found.' });
+  if (job.status !== 'failed') return res.status(409).json({ error: 'Only failed video jobs can be retried.' });
+  if (job.total_bytes > 0 && job.downloaded_bytes < job.total_bytes) {
+    return res.status(409).json({ error: 'The source download was incomplete. Import the video again to retry.' });
+  }
+  const validation = resolveTemplate(req.body?.templateId);
+  if (!validation) return res.status(400).json({ error: 'Selected template was not found.' });
+
+  const sourcePath = path.resolve(root, job.file_path || '');
+  const relative = path.relative(path.resolve(dataDir, 'original'), sourcePath);
+  if (!relative || relative === '..' || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) {
+    return res.status(400).json({ error: 'Source video path is invalid.' });
+  }
+  if (!fs.existsSync(sourcePath)) return res.status(404).json({ error: 'Downloaded source video is missing. Import it again.' });
+
+  db.prepare('UPDATE jobs SET status=?,error=NULL,progress=0 WHERE id=?').run('queued', job.id);
+  res.status(202).json({ ok: true, jobId: job.id });
+  runPipeline(job.id, sourcePath, job.title, validation);
 });
 
 app.get('/api/jobs/:id/download', (req, res) => {

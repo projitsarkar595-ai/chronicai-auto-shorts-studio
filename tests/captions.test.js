@@ -29,3 +29,24 @@ test('spoken caption segments are clipped and shifted to the output timeline', (
     rmSync(tempDir, { recursive: true, force: true });
   }
 });
+
+test('missing FFmpeg whisper filter skips captions without failing video processing', () => {
+  const script = [
+    'import contextlib, io, json',
+    'from types import SimpleNamespace',
+    'from unittest.mock import patch',
+    'from python_engine.pipeline import transcribe_with_whisper',
+    "calls = iter([SimpleNamespace(stdout='0'), SimpleNamespace(stdout='filters without speech support')])",
+    "warning = io.StringIO()",
+    "with patch('python_engine.pipeline.subprocess.run', side_effect=lambda *args, **kwargs: next(calls)), contextlib.redirect_stderr(warning):",
+    "    result = transcribe_with_whisper('video.mp4', '.', 'job', 'models', 'base')",
+    "print(json.dumps({'segments': result, 'warning': warning.getvalue()}))"
+  ].join('\n');
+  const output = execFileSync(process.env.PYTHON_EXECUTABLE || 'python', ['-c', script], {
+    cwd: process.cwd(),
+    encoding: 'utf8'
+  });
+  const result = JSON.parse(output);
+  assert.deepEqual(result.segments, []);
+  assert.match(result.warning, /Speech captions were skipped/);
+});
