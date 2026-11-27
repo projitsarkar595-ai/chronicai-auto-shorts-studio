@@ -10,6 +10,7 @@ import crypto from 'node:crypto';
 import { spawn } from 'node:child_process';
 import { google } from 'googleapis';
 import { DatabaseSync } from 'node:sqlite';
+import { getAuthorizedVideoSource } from './video-url.js';
 
 const app = express();
 const port = Number(process.env.PORT || 4000);
@@ -38,6 +39,7 @@ CREATE TABLE IF NOT EXISTS jobs(id TEXT PRIMARY KEY,title TEXT,status TEXT,sourc
 CREATE TABLE IF NOT EXISTS clips(id TEXT PRIMARY KEY,job_id TEXT,title TEXT,description TEXT,caption TEXT,hashtags TEXT,transcript TEXT,duration REAL,path TEXT,approved INTEGER DEFAULT 0,uploaded INTEGER DEFAULT 0,created_at TEXT,template_id TEXT);
 CREATE TABLE IF NOT EXISTS templates(id TEXT PRIMARY KEY,name TEXT,settings TEXT,created_at TEXT);
 CREATE TABLE IF NOT EXISTS uploads(id TEXT PRIMARY KEY,clip_id TEXT,youtube_id TEXT,status TEXT,error TEXT,created_at TEXT);
+CREATE TABLE IF NOT EXISTS clip_edits(id TEXT PRIMARY KEY,clip_id TEXT,status TEXT,error TEXT,output_path TEXT,settings TEXT,created_at TEXT);
 CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY,value TEXT);
 `);
 const jobColumns = new Set(db.prepare('PRAGMA table_info(jobs)').all().map(column => column.name));
@@ -76,6 +78,14 @@ const upload = multer({
 
 function logError(jobId, message) {
   fs.appendFileSync(path.join(root, 'logs', 'app.log'), `${new Date().toISOString()} ${jobId} ${message}\n`);
+}
+
+function youtubeUploadError(error) {
+  const message = String(error?.message || '');
+  if (/exceeded the number of videos|uploadLimitExceeded|quotaExceeded|quota/i.test(message)) {
+    return 'YouTube upload quota exceeded. Wait for the daily quota to reset, or request a quota increase in Google Cloud Console.';
+  }
+  return null;
 }
 
 function defaultTemplateId() {
@@ -139,14 +149,6 @@ function runPipeline(jobId, inputPath, title = 'Imported video', template = reso
   });
 }
 
-function validateFacebookUrl(value) {
-  try {
-    const u = new URL(value);
-    if (!['www.facebook.com','facebook.com','fb.watch','m.facebook.com'].includes(u.hostname.toLowerCase())) return false;
-    return u.protocol === 'https:' || u.protocol === 'http:';
-  } catch { return false; }
-}
-
 app.get('/api/dashboard', (req, res) => {
   const count = (table) => db.prepare(`SELECT COUNT(*) AS n FROM ${table}`).get().n;
   res.json({
@@ -167,12 +169,90 @@ app.get('/api/jobs/:id', (req, res) => {
   res.json(job);
 });
 
+app.get('/api/jobs/:id/download', (req, res) => {
+  const job = db.prepare('SELECT title,file_path FROM jobs WHERE id=?').get(req.params.id);
+  if (!job?.file_path) return res.status(404).json({ error: 'Imported source video not found.' });
+  const absolute = path.resolve(root, job.file_path);
+  const relative = path.relative(path.resolve(dataDir, 'original'), absolute);
+  if (!relative || relative === '..' || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) {
+    return res.status(400).json({ error: 'Source video path is invalid.' });
+  }
+  if (!fs.existsSync(absolute)) return res.status(404).json({ error: 'Source video file is missing.' });
+  const filename = `${String(job.title || 'source-video').replace(/[<>:"/\\|?*\x00-\x1F]/g, '_')}.mp4`;
+  res.download(absolute, filename);
+});
+
 app.get('/api/clips', (req, res) => {
   res.json(db.prepare(`
     SELECT clips.*,
       (SELECT youtube_id FROM uploads WHERE clip_id=clips.id AND status='uploaded' ORDER BY created_at DESC LIMIT 1) AS youtube_id
     FROM clips ORDER BY created_at DESC
   `).all().map(c => ({...c, hashtags: JSON.parse(c.hashtags || '[]'), approved: Boolean(c.approved), uploaded: Boolean(c.uploaded)})));
+});
+
+app.get('/api/clips/:id/download', (req, res) => {
+  const clip = db.prepare('SELECT title,path FROM clips WHERE id=?').get(req.params.id);
+  if (!clip) return res.status(404).json({ error: 'Clip not found.' });
+  const absolute = path.resolve(root, clip.path);
+  const relative = path.relative(path.resolve(dataDir, 'clips'), absolute);
+  if (!relative || relative === '..' || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) {
+    return res.status(400).json({ error: 'Clip file path is invalid.' });
+  }
+  if (!fs.existsSync(absolute)) return res.status(404).json({ error: 'Clip video file is missing.' });
+  const filename = `${String(clip.title || 'video-clip').replace(/[<>:"/\\|?*\x00-\x1F]/g, '_')}.mp4`;
+  res.download(absolute, filename);
+});
+
+app.post('/api/clips/:id/edit', (req, res) => {
+  const clip = db.prepare('SELECT id,path FROM clips WHERE id=?').get(req.params.id);
+  if (!clip) return res.status(404).json({ error: 'Clip not found.' });
+  const validation = validateTemplateSettings(req.body?.settings);
+  if (validation.error) return res.status(400).json({ error: validation.error });
+
+  const clipsDirectory = path.resolve(dataDir, 'clips');
+  const inputPath = path.resolve(root, clip.path);
+  const relativeInput = path.relative(clipsDirectory, inputPath);
+  if (!relativeInput || relativeInput === '..' || relativeInput.startsWith(`..${path.sep}`) || path.isAbsolute(relativeInput)) {
+    return res.status(400).json({ error: 'Clip file path is invalid.' });
+  }
+  if (!fs.existsSync(inputPath)) return res.status(404).json({ error: 'Clip video file is missing.' });
+
+  const editId = crypto.randomUUID();
+  const outputPath = path.join(clipsDirectory, `${editId}.mp4`);
+  const relativeOutput = path.relative(root, outputPath).split(path.sep).join('/');
+  db.prepare('INSERT INTO clip_edits(id,clip_id,status,output_path,settings,created_at) VALUES(?,?,?,?,?,?)')
+    .run(editId, clip.id, 'processing', relativeOutput, JSON.stringify(validation.settings), new Date().toISOString());
+  res.status(202).json({ editId });
+
+  const proc = spawn(process.env.PYTHON_EXECUTABLE || 'python', [
+    path.join(root, 'python_engine', 'edit_clip.py'),
+    '--input', inputPath,
+    '--output', outputPath,
+    '--settings-json', JSON.stringify(validation.settings)
+  ], { cwd: root });
+  let error = '';
+  proc.stderr.on('data', chunk => { error += chunk.toString(); });
+  proc.on('error', spawnError => {
+    db.prepare('UPDATE clip_edits SET status=?,error=? WHERE id=?')
+      .run('failed', `Could not start clip editor: ${spawnError.message}`, editId);
+  });
+  proc.on('close', code => {
+    if (code === 0 && fs.existsSync(outputPath)) {
+      db.prepare('UPDATE clips SET path=?,template_id=NULL WHERE id=?').run(relativeOutput, clip.id);
+      db.prepare('UPDATE clip_edits SET status=? WHERE id=?').run('completed', editId);
+      return;
+    }
+    if (fs.existsSync(outputPath)) fs.unlinkSync(outputPath);
+    const message = error.trim().split(/\r?\n/).filter(Boolean).at(-1)?.slice(0, 300) || 'Clip edit failed. Check FFmpeg and server logs.';
+    db.prepare('UPDATE clip_edits SET status=?,error=? WHERE id=?').run('failed', message, editId);
+    logError(editId, message);
+  });
+});
+
+app.get('/api/clip-edits/:id', (req, res) => {
+  const edit = db.prepare('SELECT id,clip_id,status,error FROM clip_edits WHERE id=?').get(req.params.id);
+  if (!edit) return res.status(404).json({ error: 'Edit job not found.' });
+  res.json(edit);
 });
 
 app.post('/api/clips/:id/approve', (req, res) => {
@@ -315,13 +395,15 @@ app.post('/api/assistant/chat', async (req, res) => {
 app.post('/api/import/url', async (req, res) => {
   const { url, ownershipConfirmed } = req.body;
   if (ownershipConfirmed !== true) return res.status(400).json({ error: 'Confirm that you own or are authorized to use this video.' });
-  if (!validateFacebookUrl(url)) return res.status(400).json({ error: 'Enter a valid public Facebook or fb.watch video URL.' });
+  const source = getAuthorizedVideoSource(url);
+  if (!source) return res.status(400).json({ error: 'Enter a public Facebook, Instagram, or YouTube video URL. Private or login-required videos are not supported.' });
   const template = resolveTemplate(req.body.templateId);
   if (!template) return res.status(400).json({ error: 'Selected template was not found. Choose a saved template and try again.' });
   const id = crypto.randomUUID();
   const output = path.join(dataDir, 'original', `${id}.mp4`);
   const relativeOutput = path.relative(root, output).split(path.sep).join('/');
-  db.prepare('INSERT INTO jobs(id,title,status,source,created_at,file_path,template_id) VALUES(?,?,?,?,?,?,?)').run(id, 'Facebook import', 'importing', url, new Date().toISOString(), relativeOutput, template.id);
+  const title = `${source} import`;
+  db.prepare('INSERT INTO jobs(id,title,status,source,created_at,file_path,template_id) VALUES(?,?,?,?,?,?,?)').run(id, title, 'importing', url, new Date().toISOString(), relativeOutput, template.id);
   res.status(202).json({ ok: true, jobId: id });
 
   db.prepare('UPDATE jobs SET status=? WHERE id=?').run('downloading', id);
@@ -347,7 +429,7 @@ app.post('/api/import/url', async (req, res) => {
   proc.on('close', code => {
     if (code === 0 && fs.existsSync(output)) {
       db.prepare('UPDATE jobs SET progress=100 WHERE id=?').run(id);
-      runPipeline(id, output, 'Facebook import', template);
+      runPipeline(id, output, title, template);
     }
     else {
       const message = error.includes('yt-dlp') ? 'Authorized source import unavailable. Upload a local copy instead.' : 'Video could not be retrieved from the authorized source.';
@@ -442,7 +524,8 @@ app.post('/api/youtube/upload/:clipId', async (req, res) => {
     res.json({ ok:true, youtubeId:response.data.id });
   } catch (error) {
     db.prepare('INSERT INTO uploads(id,clip_id,status,error,created_at) VALUES(?,?,?,?,?)').run(crypto.randomUUID(),clip.id,'failed',error.message,new Date().toISOString());
-    res.status(502).json({ error:'YouTube upload failed.', detail:error.message });
+    const detail = youtubeUploadError(error) || error.message;
+    res.status(502).json({ error:'YouTube upload failed.', detail });
   }
 });
 

@@ -3,11 +3,23 @@ import { createRoot } from 'react-dom/client';
 import {
   LayoutDashboard, Upload, WandSparkles, PanelsTopLeft,
   Eye, Youtube, Settings, Search, Plus, Check, Clock3,
-  AlertTriangle, Play, MoreHorizontal, ChevronRight, MessageCircle, Trash2
+  AlertTriangle, Play, MoreHorizontal, ChevronRight, MessageCircle, Trash2, Download, Pencil
 } from 'lucide-react';
 import './styles.css';
 
-const API = (import.meta.env.VITE_API_URL || 'http://localhost:4000').replace(/\/+$/, '');
+const API = (import.meta.env.VITE_API_URL || (import.meta.env.DEV ? 'http://localhost:4000' : '')).replace(/\/+$/, '');
+
+async function fetchJson(url, options) {
+  const response = await fetch(url, options);
+  let data;
+  try {
+    data = await response.json();
+  } catch {
+    throw new Error(`Video server returned an invalid response (${response.status}). Check VITE_API_URL.`);
+  }
+  if (!response.ok) throw new Error(data.error || `Request failed (${response.status}).`);
+  return data;
+}
 
 function IconButton({ icon: Icon, label, active, onClick }) {
   return <button className={`nav-item ${active ? 'active' : ''}`} onClick={onClick} title={label}>
@@ -26,35 +38,47 @@ function App() {
   const [defaultTemplateId, setDefaultTemplateId] = useState('default');
   const [selectedTemplateId, setSelectedTemplateId] = useState('');
   const [sourceUrl, setSourceUrl] = useState('');
+  const [ownershipConfirmed, setOwnershipConfirmed] = useState(false);
   const [activeJobId, setActiveJobId] = useState(null);
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState('');
+  const [apiError, setApiError] = useState('');
 
   async function refresh() {
-    const [s, c, j, t, settings, youtube] = await Promise.all([
-      fetch(`${API}/api/dashboard`).then(r => r.json()),
-      fetch(`${API}/api/clips`).then(r => r.json()),
-      fetch(`${API}/api/jobs`).then(r => r.json()),
-      fetch(`${API}/api/templates`).then(r => r.json()),
-      fetch(`${API}/api/settings`).then(r => r.json()),
-      fetch(`${API}/api/youtube/status`).then(r => r.json())
-    ]);
-    setStats(s); setClips(c); setJobs(j); setTemplates(t);
-    setDefaultTemplateId(settings.defaultTemplateId);
-    setYoutubeStatus(youtube);
+    try {
+      if (!API) throw new Error('VITE_API_URL is not set for this deployed website.');
+      const [s, c, j, t, settings, youtube] = await Promise.all([
+        fetchJson(`${API}/api/dashboard`),
+        fetchJson(`${API}/api/clips`),
+        fetchJson(`${API}/api/jobs`),
+        fetchJson(`${API}/api/templates`),
+        fetchJson(`${API}/api/settings`),
+        fetchJson(`${API}/api/youtube/status`)
+      ]);
+      setStats(s); setClips(c); setJobs(j); setTemplates(t);
+      setDefaultTemplateId(settings.defaultTemplateId);
+      setYoutubeStatus(youtube);
+      setApiError('');
+    } catch (error) {
+      setApiError(`Cannot connect to the video server. ${error.message}`);
+    }
   }
   useEffect(() => { refresh(); const id = setInterval(refresh, 4000); return () => clearInterval(id); }, []);
 
   async function importUrl(e) {
     e.preventDefault(); setBusy(true); setMessage('');
-    const r = await fetch(`${API}/api/import/url`, {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ url: sourceUrl, ownershipConfirmed: true, templateId: selectedTemplateId || defaultTemplateId })
-    });
-    const data = await r.json();
-    if (!r.ok) setMessage(data.error || 'Import failed');
-    else { setMessage('Import started. Processing in the background.'); setActiveJobId(data.jobId); }
-    setBusy(false); refresh();
+    try {
+      const data = await fetchJson(`${API}/api/import/url`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ url: sourceUrl, ownershipConfirmed, templateId: selectedTemplateId || defaultTemplateId })
+      });
+      setMessage('Import started. Processing in the background.');
+      setActiveJobId(data.jobId);
+    } catch (error) {
+      setMessage(error.message || 'Import failed. Check the video server and try again.');
+    } finally {
+      setBusy(false); refresh();
+    }
   }
 
   async function uploadFile(e) {
@@ -62,15 +86,19 @@ function App() {
     setBusy(true);
     const form = new FormData(); form.append('video', file);
     form.append('templateId', selectedTemplateId || defaultTemplateId);
-    const r = await fetch(`${API}/api/import/upload`, { method: 'POST', body: form });
-    const data = await r.json();
-    setMessage(r.ok ? 'Upload started. Processing in the background.' : data.error);
-    if (r.ok) setActiveJobId(data.jobId);
-    setBusy(false); refresh();
+    try {
+      const data = await fetchJson(`${API}/api/import/upload`, { method: 'POST', body: form });
+      setMessage('Upload started. Processing in the background.');
+      setActiveJobId(data.jobId);
+    } catch (error) {
+      setMessage(error.message || 'Upload failed. Check the video server and try again.');
+    } finally {
+      setBusy(false); refresh();
+    }
   }
 
   async function approveClip(id) {
-    await fetch(`${API}/api/clips/${id}/approve`, { method: 'POST' }); refresh();
+    await fetchJson(`${API}/api/clips/${id}/approve`, { method: 'POST' }); refresh();
   }
 
   const nav = [
@@ -80,16 +108,23 @@ function App() {
   ];
 
   return <div className="shell">
-    <aside>
-      <div className="brand"><div className="brand-mark">C</div><div><b>ChronicAI</b><small>AUTO SHORTS STUDIO</small></div></div>
-      <nav>{nav.map(([label, Icon]) => <IconButton key={label} icon={Icon} label={label} active={page === label} onClick={() => setPage(label)} />)}</nav>
-      <div className="quota"><div className="quota-top"><span>YouTube quota</span><b>78%</b></div><div className="bar"><i /></div><small>7,800 of 10,000 units</small></div>
+    <aside className="sidebar">
+      <div className="brand"><div className="brand-mark"><WandSparkles size={18}/></div><div><b>ChronicAI</b><small>SHORTS STUDIO</small></div></div>
+      <nav className="sidebar-nav">
+        <span className="nav-label">WORKSPACE</span>
+        {nav.map(([label, Icon], index) => <React.Fragment key={label}>
+          {index === 5 && <span className="nav-label nav-label-secondary">PUBLISH & SUPPORT</span>}
+          <IconButton icon={Icon} label={label} active={page === label} onClick={() => setPage(label)} />
+        </React.Fragment>)}
+      </nav>
+      <QuotaRenewal />
       <div className="profile"><div className="avatar">AK</div><div><b>Studio Account</b><small>Creator workspace</small></div><MoreHorizontal size={18} /></div>
     </aside>
     <main>
-      <header><div><p>WORKSPACE</p><h1>{page}</h1></div><div className="header-actions"><button className="icon"><Search size={18}/></button><button className="primary" onClick={() => setPage('Import')}><Plus size={17}/> New Project</button></div></header>
+      <header><div className="page-heading"><p>YOUR CREATOR WORKSPACE</p><h1>{page}</h1><span>{page === 'Dashboard' ? 'Your video workflow, all in one place.' : page === 'Import' ? 'Bring in a video and turn it into standout shorts.' : page === 'Clips' || page === 'Preview' ? 'Review, refine, and publish your latest clips.' : page === 'Templates' ? 'Make every short feel like your brand.' : page === 'YouTube' ? 'Manage your channel connection and publishing.' : page === 'Settings' ? 'Fine-tune your content workflow.' : 'Get help with your video workflow.'}</span></div><div className="header-actions"><QuotaRenewal compact/><button className="icon" aria-label="Search"><Search size={18}/></button><button className="primary" onClick={() => setPage('Import')}><Plus size={17}/> New Project</button></div></header>
+      {apiError && <div className="api-connection-error" role="alert"><AlertTriangle size={17}/><span>{apiError}</span><button className="secondary" onClick={refresh}>Retry connection</button></div>}
       {page === 'Dashboard' && <Dashboard stats={stats} jobs={jobs} clips={clips} setPage={setPage}/>}
-      {page === 'Import' && <Import sourceUrl={sourceUrl} setSourceUrl={setSourceUrl} importUrl={importUrl} uploadFile={uploadFile} busy={busy} message={message} templates={templates} defaultTemplateId={defaultTemplateId} selectedTemplateId={selectedTemplateId || defaultTemplateId} setSelectedTemplateId={setSelectedTemplateId} activeJobId={activeJobId || jobs.find(job => job.file_path)?.id || jobs.find(job => ['importing','downloading','processing'].includes(job.status))?.id}/>}
+      {page === 'Import' && <Import sourceUrl={sourceUrl} setSourceUrl={value=>{setSourceUrl(value);setOwnershipConfirmed(false);}} ownershipConfirmed={ownershipConfirmed} setOwnershipConfirmed={setOwnershipConfirmed} importUrl={importUrl} uploadFile={uploadFile} busy={busy} message={message} templates={templates} defaultTemplateId={defaultTemplateId} selectedTemplateId={selectedTemplateId || defaultTemplateId} setSelectedTemplateId={setSelectedTemplateId} activeJobId={activeJobId || jobs.find(job => job.file_path)?.id || jobs.find(job => ['importing','downloading','processing'].includes(job.status))?.id}/>}
       {page === 'Clips' && <Clips clips={clips} templates={templates} approveClip={approveClip} onDeleted={refresh} youtubeConnected={youtubeStatus?.connected} uploadPrivacy={uploadPrivacy} setPage={setPage}/>}
       {page === 'Templates' && <Templates templates={templates} defaultTemplateId={defaultTemplateId} onDefaultChange={id=>{setDefaultTemplateId(id);setSelectedTemplateId('');}} refresh={refresh}/>}
       {page === 'YouTube' && <YouTubeSetup status={youtubeStatus} privacy={uploadPrivacy} setPrivacy={setUploadPrivacy}/>}
@@ -97,6 +132,67 @@ function App() {
       {page === 'Preview' && <Clips clips={clips} templates={templates} approveClip={approveClip} onDeleted={refresh} youtubeConnected={youtubeStatus?.connected} uploadPrivacy={uploadPrivacy} setPage={setPage}/>}
       {page === 'AI Assistant' && <Assistant />}
     </main>
+  </div>;
+}
+
+function QuotaRenewal({ compact = false }) {
+  const [now, setNow] = useState(() => new Date());
+
+  useEffect(() => {
+    const timer = setInterval(() => setNow(new Date()), 1000);
+    return () => clearInterval(timer);
+  }, []);
+
+  function pacificTimeParts(date) {
+    const parts = new Intl.DateTimeFormat('en-US', {
+      timeZone: 'America/Los_Angeles',
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+      hour: '2-digit',
+      minute: '2-digit',
+      second: '2-digit',
+      hourCycle: 'h23'
+    }).formatToParts(date);
+    return Object.fromEntries(parts.filter(part => part.type !== 'literal').map(part => [part.type, Number(part.value)]));
+  }
+
+  const pacific = pacificTimeParts(now);
+  const todayKey = `${pacific.year}-${pacific.month}-${pacific.day}`;
+  let reset = new Date(now);
+  const halfHour = 30 * 60 * 1000;
+  reset = new Date(Math.floor(now.getTime() / halfHour) * halfHour);
+  for (let i = 0; i < 96; i++) {
+    const candidate = new Date(reset.getTime() + i * halfHour);
+    const candidatePacific = pacificTimeParts(candidate);
+    const candidateKey = `${candidatePacific.year}-${candidatePacific.month}-${candidatePacific.day}`;
+    if (candidateKey !== todayKey && candidatePacific.hour === 0 && candidatePacific.minute === 0) {
+      reset = candidate;
+      break;
+    }
+  }
+
+  const remaining = Math.max(0, reset.getTime() - now.getTime());
+  const totalSeconds = Math.floor(remaining / 1000);
+  const hours = Math.floor(totalSeconds / 3600);
+  const minutes = Math.floor((totalSeconds % 3600) / 60);
+  const seconds = totalSeconds % 60;
+  const countdown = [hours, minutes, seconds].map(value => String(value).padStart(2, '0')).join(':');
+
+  const elapsed = Math.max(0, Math.min((24 * 60 * 60 * 1000) - remaining, 24 * 60 * 60 * 1000));
+  const elapsedPercent = elapsed / (24 * 60 * 60 * 1000) * 100;
+
+  return <div className={`quota quota-renewal${compact ? ' quota-renewal-compact' : ''}`}>
+    {!compact && <div className="quota-top"><span>YouTube quota</span></div>}
+    <div className="quota-renewal-row">
+      <div className="quota-ring" style={{ '--renewal-progress': `${elapsedPercent * 3.6}deg` }}>
+        <div><Clock3 size={11}/></div>
+      </div>
+      <div>
+        <small>Daily quota renews in</small>
+        <strong aria-live="off">{countdown}</strong>
+      </div>
+    </div>
   </div>;
 }
 
@@ -157,6 +253,10 @@ function Dashboard({stats, jobs, clips, setPage}) {
     ['Uploaded', stats.uploaded, Youtube, 'red']
   ];
   return <>
+    <section className="dashboard-hero">
+      <div className="dashboard-hero-copy"><span className="hero-kicker"><WandSparkles size={14}/> YOUR SHORTS WORKFLOW</span><h2>Make something<br/><em>worth watching.</em></h2><p>Import a video, shape it into vertical clips, and get it ready to publish.</p><button className="primary" onClick={() => setPage('Import')}><Plus size={16}/> Start a new project</button></div>
+      <div className="hero-art" aria-hidden="true"><div className="hero-orbit orbit-one"/><div className="hero-orbit orbit-two"/><div className="hero-phone"><div className="hero-phone-screen"><WandSparkles size={26}/><span>YOUR NEXT<br/>SHORT STARTS HERE</span><i/></div></div><div className="hero-sparkle sparkle-one">✦</div><div className="hero-sparkle sparkle-two">✧</div></div>
+    </section>
     <div className="stats">{cards.map(([label, value, Icon, tone]) => <div className="stat" key={label}><div className={`stat-icon ${tone}`}><Icon size={20}/></div><div><small>{label}</small><strong>{value}</strong></div><ChevronRight size={16}/></div>)}</div>
     <div className="grid">
       <section className="panel queue"><div className="panel-head"><div><p>LIVE ACTIVITY</p><h2>Processing Queue</h2></div><button className="text-button" onClick={() => setPage('Clips')}>View all</button></div>
@@ -167,7 +267,7 @@ function Dashboard({stats, jobs, clips, setPage}) {
   </>;
 }
 
-function Import({sourceUrl,setSourceUrl,importUrl,uploadFile,busy,message,templates,defaultTemplateId,selectedTemplateId,setSelectedTemplateId,activeJobId}) {
+function Import({sourceUrl,setSourceUrl,ownershipConfirmed,setOwnershipConfirmed,importUrl,uploadFile,busy,message,templates,defaultTemplateId,selectedTemplateId,setSelectedTemplateId,activeJobId}) {
   const [job,setJob] = useState(null);
   const [pollError,setPollError] = useState('');
   useEffect(() => {
@@ -197,10 +297,10 @@ function Import({sourceUrl,setSourceUrl,importUrl,uploadFile,busy,message,templa
     <section className="panel import-card">
       <div className="import-icon"><Upload size={26}/></div><p className="eyebrow">NEW PROJECT</p><h2>Import a video</h2><p className="muted">Import only content you own or have permission to use.</p>
       <div className="template-select"><label htmlFor="import-template">Editing template</label><select id="import-template" value={selectedTemplateId} onChange={event=>setSelectedTemplateId(event.target.value)}>{templates.map(template=><option key={template.id} value={template.id}>{template.name}{template.id===defaultTemplateId?' · Default':''}</option>)}</select><small>Applied to this video. First captioned render downloads the 141 MiB Whisper speech model.</small></div>
-      <form onSubmit={importUrl}><label>Facebook video URL</label><div className="url-row"><input value={sourceUrl} onChange={e=>setSourceUrl(e.target.value)} placeholder="https://www.facebook.com/share/v/..." /><button className="primary" disabled={busy || !sourceUrl}>Import</button></div></form>
+      <form onSubmit={importUrl}><label htmlFor="source-url">Video link (YouTube, Instagram, or Facebook)</label><div className="url-row"><input id="source-url" value={sourceUrl} onChange={e=>setSourceUrl(e.target.value)} placeholder="Paste a public video link" /><button className="primary" disabled={busy || !sourceUrl || !ownershipConfirmed}>Import</button></div><label className="import-ownership"><input type="checkbox" checked={ownershipConfirmed} onChange={event=>setOwnershipConfirmed(event.target.checked)}/><span>I own this video or have permission to download and use it. It is public and does not require login.</span></label></form>
       {message && <div className="notice"><Check size={16}/>{message}</div>}
       {job && <DownloadProgress job={job}/>}
-      {job?.file_path && ['processing','completed','failed'].includes(job.status) && <div className="source-preview"><div className="preview-heading"><div><b>Imported video</b><small>{job.title}</small></div><span>{job.status === 'completed' ? 'Ready' : job.status === 'failed' ? 'Processing failed' : 'Processing'}</span></div><video controls preload="metadata" src={`${API}/${job.file_path}`} /></div>}
+      {job?.file_path && ['processing','completed','failed'].includes(job.status) && <div className="source-preview"><div className="preview-heading"><div><b>Imported video</b><small>{job.title}</small></div><div className="preview-actions"><span>{job.status === 'completed' ? 'Ready' : job.status === 'failed' ? 'Processing failed' : 'Processing'}</span><a className="secondary" href={`${API}/api/jobs/${job.id}/download`}><Download size={14}/> Download</a></div></div><video controls preload="metadata" src={`${API}/${job.file_path}`} /></div>}
       {pollError && <div className="assistant-error">{pollError}</div>}
       <div className="divider"><span>OR</span></div>
       <label className="dropzone"><input type="file" accept="video/mp4,video/quicktime,video/webm,video/x-matroska,.mkv" onChange={uploadFile}/><Upload size={22}/><b>Upload local video</b><span>MP4, MOV, WebM or MKV up to 2 GB</span></label>
@@ -239,7 +339,73 @@ function Clips({clips,templates,approveClip,onDeleted,youtubeConnected,uploadPri
   const [deletingId,setDeletingId] = useState(null);
   const [uploadingId,setUploadingId] = useState(null);
   const [error,setError] = useState('');
+  const [editingClip,setEditingClip] = useState(null);
+  const [editSettings,setEditSettings] = useState(null);
+  const [editJobId,setEditJobId] = useState(null);
+  const [editBusy,setEditBusy] = useState(false);
   const visibleClips = clips.filter(clip => !deletedIds.includes(clip.id));
+
+  useEffect(() => {
+    if (!editJobId) return undefined;
+    let active = true;
+    let timer;
+    const poll = async () => {
+      try {
+        const edit = await fetchJson(`${API}/api/clip-edits/${editJobId}`);
+        if (!active || !['completed','failed'].includes(edit.status)) return;
+        clearInterval(timer);
+        setEditJobId(null);
+        setEditBusy(false);
+        if (edit.status === 'failed') {
+          setError(edit.error || 'Could not edit this clip.');
+          return;
+        }
+        setEditingClip(null);
+        await onDeleted();
+      } catch (requestError) {
+        if (!active) return;
+        clearInterval(timer);
+        setEditJobId(null);
+        setEditBusy(false);
+        setError(requestError.message || 'Could not check clip edit status.');
+      }
+    };
+    poll();
+    timer = setInterval(poll, 1200);
+    return () => { active = false; clearInterval(timer); };
+  }, [editJobId]);
+
+  function openEditor(clip) {
+    const template = templates.find(item => item.id === clip.template_id);
+    const settings = template?.settings || {};
+    setEditingClip(clip);
+    setEditSettings({
+      aspectRatio: settings.aspectRatio || '9:16',
+      zoom: Number(settings.zoom) || 1.12,
+      captionsEnabled: settings.captionsEnabled !== false,
+      captionColor: settings.captionColor || '#FFFFFF',
+      captionFontSize: Number(settings.captionFontSize) || 48,
+      captionPosition: settings.captionPosition || 'bottom'
+    });
+    setError('');
+  }
+
+  async function saveClipEdit(event) {
+    event.preventDefault();
+    if (!editingClip || !editSettings) return;
+    setEditBusy(true); setError('');
+    try {
+      const result = await fetchJson(`${API}/api/clips/${editingClip.id}/edit`, {
+        method:'POST',
+        headers:{'Content-Type':'application/json'},
+        body:JSON.stringify({settings:editSettings})
+      });
+      setEditJobId(result.editId);
+    } catch (requestError) {
+      setEditBusy(false);
+      setError(requestError.message || 'Could not start clip edit.');
+    }
+  }
 
   async function uploadClip(clip) {
     setUploadingId(clip.id); setError('');
@@ -278,10 +444,55 @@ function Clips({clips,templates,approveClip,onDeleted,youtubeConnected,uploadPri
     }
   }
 
-  return <>{error && <div className="assistant-error">{error}</div>}<div className="clips-grid">{visibleClips.length ? visibleClips.map(c => <article className="clip" key={c.id}>
-    <div className="clip-video"><video className="clip-preview" controls preload="metadata" src={`${API}/${c.path}`} /><div className="clip-duration">{Math.round(c.duration || 30)}s</div></div>
-    <div className="clip-body"><div className="clip-status">{c.uploaded ? 'Uploaded to YouTube' : c.approved ? 'Approved' : 'Needs review'}</div><h3>{c.title || 'AI Short'}</h3><p>{c.description || c.transcript || 'Transcript pending...'}</p>{c.template_id && <small className="applied-template">Template: {templates.find(template=>template.id===c.template_id)?.name || 'Saved template'}</small>}{c.youtube_id && <a className="youtube-watch" href={`https://www.youtube.com/watch?v=${encodeURIComponent(c.youtube_id)}`} target="_blank" rel="noreferrer">Watch on YouTube</a>}<div className="clip-actions"><button className="secondary">Edit</button><button className="primary" onClick={()=>approveClip(c.id)} disabled={c.approved}>{c.approved ? 'Approved' : 'Approve'}</button>{c.approved && !c.uploaded && (youtubeConnected ? <button className="primary" onClick={()=>uploadClip(c)} disabled={uploadingId===c.id}>{uploadingId===c.id?'Uploading…':'Upload to YouTube'}</button> : <button className="secondary" onClick={()=>setPage('YouTube')}>Connect YouTube</button>)}<button className="delete-clip" onClick={()=>deleteClip(c)} disabled={deletingId===c.id || uploadingId===c.id} title="Delete clip"><Trash2 size={15}/><span>{deletingId===c.id?'Deleting':'Delete'}</span></button></div></div>
-  </article>) : <Empty icon={WandSparkles} text="No clips yet. Import a video to begin."/>}</div></>;
+  return <>
+    {error && <div className="assistant-error">{error}</div>}
+    <div className="clips-grid">
+      {visibleClips.length ? visibleClips.map(clip => <article className="clip" key={clip.id}>
+        <div className="clip-video">
+          <video className="clip-preview" controls preload="metadata" src={`${API}/${clip.path}`} />
+          <div className="clip-duration">{Math.round(clip.duration || 30)}s</div>
+        </div>
+        <div className="clip-body">
+          <div className="clip-status">{clip.uploaded ? 'Uploaded to YouTube' : clip.approved ? 'Approved' : 'Needs review'}</div>
+          <h3>{clip.title || 'AI Short'}</h3>
+          <p>{clip.description || clip.transcript || 'Transcript pending...'}</p>
+          {clip.template_id && <small className="applied-template">Template: {templates.find(template=>template.id===clip.template_id)?.name || 'Saved template'}</small>}
+          {clip.youtube_id && <a className="youtube-watch" href={`https://www.youtube.com/watch?v=${encodeURIComponent(clip.youtube_id)}`} target="_blank" rel="noreferrer">Watch on YouTube</a>}
+          <div className="clip-actions">
+            <button className="secondary" onClick={()=>openEditor(clip)}><Pencil size={14}/> Edit</button>
+            <a className="secondary download-clip-link" href={`${API}/api/clips/${clip.id}/download`}><Download size={14}/> Download</a>
+            <button className="primary" onClick={()=>approveClip(clip.id)} disabled={clip.approved}>{clip.approved ? 'Approved' : 'Approve'}</button>
+            {clip.approved && !clip.uploaded && (youtubeConnected
+              ? <button className="primary" onClick={()=>uploadClip(clip)} disabled={uploadingId===clip.id}>{uploadingId===clip.id?'Uploading…':'Upload to YouTube'}</button>
+              : <button className="secondary" onClick={()=>setPage('YouTube')}>Connect YouTube</button>)}
+            <button className="delete-clip" onClick={()=>deleteClip(clip)} disabled={deletingId===clip.id || uploadingId===clip.id} title="Delete clip"><Trash2 size={15}/><span>{deletingId===clip.id?'Deleting':'Delete'}</span></button>
+          </div>
+        </div>
+      </article>) : <Empty icon={WandSparkles} text="No clips yet. Import a video to begin."/>}
+    </div>
+    {editingClip && editSettings && <div className="template-modal-backdrop" onClick={event=>{if(!editBusy&&event.target===event.currentTarget)setEditingClip(null);}}>
+      <form className="clip-editor panel" onSubmit={saveClipEdit}>
+        <div className="template-head">
+          <div><p>CLIP EDITOR</p><h2>Edit video framing</h2></div>
+          <button type="button" className="secondary" onClick={()=>setEditingClip(null)} disabled={editBusy}>Close</button>
+        </div>
+        <video className="clip-editor-preview" controls preload="metadata" src={`${API}/${editingClip.path}`}/>
+        <label>Aspect ratio
+          <select value={editSettings.aspectRatio} onChange={event=>setEditSettings({...editSettings,aspectRatio:event.target.value})}>
+            <option value="9:16">9:16 · Shorts / Reels</option>
+            <option value="1:1">1:1 · Square</option>
+            <option value="16:9">16:9 · Landscape</option>
+          </select>
+        </label>
+        <label>Zoom <span>{Number(editSettings.zoom).toFixed(2)}×</span>
+          <input type="range" min="1" max="1.3" step="0.01" value={editSettings.zoom} onChange={event=>setEditSettings({...editSettings,zoom:Number(event.target.value)})}/>
+        </label>
+        <p className="muted">This renders a new crop for this clip. Existing burned-in captions stay as they are; change caption styling in Templates for future clips.</p>
+        {editBusy && <small className="processing-hint">Rendering your edit… Keep this page open until it finishes.</small>}
+        <div className="clip-editor-actions"><button type="button" className="secondary" onClick={()=>setEditingClip(null)} disabled={editBusy}>Cancel</button><button className="primary" type="submit" disabled={editBusy}>{editBusy?'Rendering…':'Apply edit'}</button></div>
+      </form>
+    </div>}
+  </>;
 }
 
 function Templates({templates,defaultTemplateId,onDefaultChange,refresh}) {
